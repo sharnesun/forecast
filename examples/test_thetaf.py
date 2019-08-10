@@ -7,4 +7,7 @@ a = a[:-1]
 print(a)
 data = pd.Series(a)
 data.index = pd.date_range(freq="w", start=0, periods = 47)
-print(Statistical.theta_f(data, n_periods=5))
+
+import ipdb; ipdb.set_trace()
+n = Statistical.theta_f(data, n_periods=5)
+print(n)

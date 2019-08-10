@@ -6,19 +6,51 @@ import numpy as np
 # import DRNN
 
 class ESRNN_model(nn.Module):
-    def __init__(self, configuration):
+    def __init__(self, num_series, configuration):
         self.configuration = configuration
+        self.num_series = num_series
 
+
+        # Setting up per series parameters, alpha, gamma, and seasonality
+        self.level_smoothing_coef = torch.ones(num_series, requires_grad=True) * .5
+        self.season_smoothing_coef = torch.ones(num_series, requires_grad=True) * .5
+        self.seasonalities = torch.ones((num_series, configuration['seasonality']), requires_grad=True) * .5
+
+
+        self.nl_layer = nn.Linear(configuration['state_hsize'], configuration['state_hsize'])
         self.activation = nn.Tanh()
         self.logistic = nn.Sigmoid()
+        self.scoring = nn.Linear(configuration['state_hsize'], configuration['state_hsize'])
+        self.DRNN = RESIDUALDRNN(configuration)
+                
+    def forward(self, train, val, test, info_cat, idxs):
+        # Obtaining the per series parameters for the batch that we are training on
+        alphas = self.logistic(torch.stack([self.level_smoothing_coef[idx] for idx in idxs]).squeeze(1))
+        gammas = self.logistic(torch.stack([self.season_smoothing_coef[idx] for idx in idxs]).squeeze(1))
+        seasonalities = torch.stack([self.seasonalities[idx] for idx in idxs])
 
-        # Create DRNN needed still
-        # self.DRNN = RESIDUALDRNN(inputs)
+        # Transposing seasonalities allows us to later use seasonality[i] for more easily 
+        # computing the i + 1 seasonality term for all series at once
+        seasonalities = torch.transpose(torch.stack(seasonalities, seasonalities[0]), 0, 1)
+        
+        levels = [train[:, 0] / seasonalities[0]]
+        log_diff_of_levels = []
 
-        # Load configurations
+        for i in range(1, train.shape[1]):
+            # Calculating levels per series
+            levels.append(alphas * (train[:, i] / seasonalities[1]) + (1 - alphas) * levels[i - 1])
 
-    def forward(self, train, val, test, info_cat, idxs)
+            log_diff_of_levels.append(torch.log(levels[i] / levels[i - 1]))
+            
+            # Calculating seasonalities per series
+            seasonalities.append(gammas * (train[:, i] / levels[i]) + (1 - gammas) * seasonalities[i])
 
+        stacked_seasonalities = torch.transpose(seasonalities, 0, 1)
+        stacked_levels = torch.transpose(levels, 0, 1)
+
+        log_mean_sq_log_diff_level = 0
+        if self.configuration['level_variability_penalty'] > 0:
+            sq_log_diff = 
 
 
 class RESIDUALDRNN(nn.Module):
@@ -29,7 +61,7 @@ class RESIDUALDRNN(nn.Module):
         layers = []
         for i, dilation in enumerate(self.configuration['dilations']):
             if i == 0:
-                input_size = self.configuration['input_size']
+                input_size = self.configuration['input_size'] + self.config['num_categories']
             else:
                 input_size = self.configuration['state_hsize']
 
