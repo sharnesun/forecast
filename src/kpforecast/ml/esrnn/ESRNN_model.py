@@ -45,7 +45,8 @@ class ESRNN_model(nn.Module):
         Feed forward for the ESRNN module.
 
         Arguments
-            - train: a tensor containing all the series that the model will train on 
+            - train: a tensor containing all the series that the model will train on, all
+                time series are expected to be of the same length
             - val: the validation/hold-out set that we will evaluate the model with
             - test: the test set
             - info_cat: the extra information we will concatenate to the training data
@@ -55,7 +56,10 @@ class ESRNN_model(nn.Module):
 
         Returns
             - predictions: model's predictions on given training batch
-            - network_act: 
+            - network_act: set of inputs given to our network
+            - hold_out_pred: predictions for the test set
+            - output_non_train: predictions for both the test and the train set
+            - 
         '''
         # Obtaining the per series parameters for the batch that we are training on
         alphas = self.logistic(torch.stack([self.level_smoothing_coef[idx] for idx in idxs]))
@@ -119,6 +123,7 @@ class ESRNN_model(nn.Module):
         hold_out_act_deseas = hold_out_act.float() / seasonalities[:, -self.configuration['output_size']:]
         hold_out_act_deseas_norm = hold_out_act_deseas / levels[:, -1].unsqueeze(1)
 
+
         self.train()
 
         return predictions, network_act, (hold_out_pred, output_non_train), (hold_out_act, hold_out_act_deseas_norm), loss_mean_sq_log_diff_level
@@ -137,7 +142,7 @@ class ESRNN_model(nn.Module):
  
             deseasonalized_train_input = train[:, input_start : input_end] / seasonalities[:, input_start : input_end]
             deseasonalized_norm_train_input = (deseasonalized_train_input / levels[:, i].unsqueeze(1))
-            if info_cat != None:
+            if info_cat is not None:
                 deseasonalized_norm_train_input = torch.cat((deseasonalized_norm_train_input, info_cat), dim=1)
 
             input_list.append(deseasonalized_norm_train_input)
@@ -156,6 +161,9 @@ class ESRNN_model(nn.Module):
         return input_list, output_list
 
     def series_forward(self, data):
+        '''
+        Feed forward through the nonlinear, dilated RNN, and final scoring/resizing layers.
+        '''
         data = self.DRNN(data)
         
         if self.add_nl_layer:
@@ -199,6 +207,9 @@ class RESIDUALDRNN(nn.Module):
 
 
     def forward(self, input_data):
+        '''
+        Feed forward for the Dilated RNN layers.
+        '''
         for i, layer in enumerate(self.rnn_stack):
             residual = input_data
             out, _ = layer(input_data)

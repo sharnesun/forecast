@@ -29,6 +29,8 @@ class TrainESRNN(nn.Module):
         self.max_epochs = configuration['epochs']
         self.prod_str = 'prod' if configuration['prod'] else 'dev'
 
+        self.log_dir = 'logs'
+
     def train_epochs(self):
         max_loss = 1e8
         start_time = time.time()
@@ -83,8 +85,7 @@ class TrainESRNN(nn.Module):
                 info_cat = None
                 _, _, (hold_out_pred, network_output_non_train), \
                 (hold_out_act, hold_out_act_deseas_norm), _ = self.model(train, val, None, info_cat, idx)
-                hold_out_loss += self.criterion(network_output_non_train.unsqueeze(0).float(),
-                                                hold_out_act_deseas_norm.unsqueeze(0).float())
+                hold_out_loss += torch.mean(torch.abs(network_output_non_train.unsqueeze(0).float() - hold_out_act_deseas_norm.unsqueeze(0).float())) 
                 acts.extend(hold_out_act.view(-1).cpu().detach().numpy())
                 preds.extend(hold_out_pred.view(-1).cpu().detach().numpy())
                 if info_cat != None:
