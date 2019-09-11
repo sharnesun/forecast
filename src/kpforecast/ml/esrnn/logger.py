@@ -17,7 +17,7 @@ class Logger(object):
         step :  training iteration
         """
         # Notice we're using the Summary "class" instead of the "tf.summary" public API.
-        summary = tf.Summary(value=[tf.Summary.Value(tag=tag, simple_value=value)])
+        summary = tf.compat.v1.Summary(value=[tf.compat.v1.Summary.Value(tag=tag, simple_value=value)])
         self.writer.add_summary(summary, step)
 
     def log_histogram(self, tag, values, step, bins=1000):

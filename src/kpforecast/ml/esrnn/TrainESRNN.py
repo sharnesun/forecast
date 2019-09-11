@@ -11,8 +11,16 @@ from IPython import embed
 
 
 class TrainESRNN(nn.Module):
+    '''
+    Trainer to be used with our ESRNN model.
+
+    Arguments
+        - model: ESRNN model that we are training
+        - dataloader: iterator that contains the batches of our data
+        - configuration: the conf=iguration of our ESRNN model
+    '''
     def __init__(self, model, dataloader, configuration):
-        # initalize TrainESRNN
+        ''' initalize TrainESRNN '''
         super(TrainESRNN, self).__init__()
         self.model = model.to(configuration['device'])
         self.configuration = configuration
@@ -29,41 +37,69 @@ class TrainESRNN(nn.Module):
         self.max_epochs = configuration['epochs']
         self.prod_str = 'prod' if configuration['prod'] else 'dev'
 
-        self.log_dir = 'logs'
+        self.log_dir = './logs'
 
     def train_epochs(self):
+        '''
+        Performs self.max_epochs epochs of training stores epoch loss and validation/hold-out loss 
+        '''
+        # Creating a logger for tensorboard
+        logger = Logger(self.log_dir)
+        
         max_loss = 1e8
         start_time = time.time()
         for e in range(self.max_epochs):
+            print("running epoch %d" % e)
             if e > 0:
                 self.scheduler.step()
             epoch_loss = self.train()
             epoch_val_loss = self.val()
+
+            # Logging the epoch loss and the validation loss
+            logger.log_scalar('Epoch Loss', epoch_loss, e)
+            logger.log_scalar('Validation Loss', epoch_val_loss, e)
         print('Total Training Mins: %5.2f' % ((time.time() - start_time)/60))
 
     def train(self):
+        '''
+        Trains for a single epoch by iterating through all batches in our dataloader
+
+        Returns
+            - epoch_loss: The accumulated loss from each batch in the epoch right after the model
+                is trained on that batch
+        '''
         self.model.train()
         epoch_loss = 0
-        for batch_num, (forecast, backcast, idx) in enumerate(self.dl):
-            train = torch.tensor(np.concatenate((forecast, backcast), axis = 1))
+        for batch_num, (backcast, forecast, idx) in enumerate(self.dl):
             start = time.time()
             print("Train_batch: %d" % (batch_num + 1))
-            loss = self.train_batch(train, forecast, None, None, idx)
+            loss = self.train_batch(backcast, forecast, idx)
             epoch_loss += loss
             end = time.time()
         epoch_loss = epoch_loss / (batch_num + 1)
         self.epochs += 1
 
-        # LOG EPOCH LEVEL INFORMATION
+        # Print epoch number and loss
         print('[TRAIN]  Epoch [%d/%d]   Loss: %.4f' % (
             self.epochs, self.max_epochs, epoch_loss))
         info = {'loss': epoch_loss}
 
         return epoch_loss
 
-    def train_batch(self, train, val, test, info_cat, idx):
+    def train_batch(self, train, val, idx):
+        '''
+        Trains a single batch of data
+        
+        Arguments
+            - train: the batch of data to train on
+            - val: the validation set
+            - idx: the corresponding indicies of the train and val series
+
+        Returns
+            - loss: Pinball loss after training on the batch of data 
+        '''
         self.optimizer.zero_grad()
-        network_pred, network_act, _, _, loss_mean_sq_log_diff_level = self.model(train, val, test, info_cat, idx)
+        network_pred, network_act = self.model(train, val, idx)
 
         loss = self.criterion(network_pred, network_act)
         loss.backward(retain_graph=True)
@@ -72,6 +108,9 @@ class TrainESRNN(nn.Module):
         return float(loss)
 
     def val(self):
+        '''
+        Calculates the validation/hold-out loss of the data
+        '''
         self.model.eval()
         with torch.no_grad(): 
             acts = []
@@ -79,73 +118,12 @@ class TrainESRNN(nn.Module):
             info_cats = []
 
             hold_out_loss = 0
-            for batch_num, (forecast, backcast, idx) in enumerate(self.dl):
-                train = torch.tensor(np.concatenate((forecast, backcast), axis = 1))
+            for batch_num, (backcast, forecast, idx) in enumerate(self.dl):
+                train = backcast
                 val = forecast
-                info_cat = None
-                _, _, (hold_out_pred, network_output_non_train), \
-                (hold_out_act, hold_out_act_deseas_norm), _ = self.model(train, val, None, info_cat, idx)
-                hold_out_loss += torch.mean(torch.abs(network_output_non_train.unsqueeze(0).float() - hold_out_act_deseas_norm.unsqueeze(0).float())) 
-                acts.extend(hold_out_act.view(-1).cpu().detach().numpy())
-                preds.extend(hold_out_pred.view(-1).cpu().detach().numpy())
-                if info_cat != None:
-                    info_cats.append(info_cat.cpu().detach().numpy())
+                predictions, actuals = self.model(train, val, idx, evaluate = True)
+                hold_out_loss += torch.mean(torch.abs(predictions.unsqueeze(0).float() - actuals.unsqueeze(0).float())) 
             hold_out_loss = hold_out_loss / (batch_num + 1)
-            
-            if info_cat != None:
-                info_cat_overall = np.concatenate(info_cats, axis=0)
-            _hold_out_df = pd.DataFrame({'acts': acts, 'preds': preds})
-
-            if info_cat != None:
-
-                cats = [val for val in self.ohe_headers[info_cat_overall.argmax(axis=1)] for _ in
-                    range(self.configuration['output_size'])]
-                _hold_out_df['category'] = cats
-
-            overall_hold_out_df = copy.copy(_hold_out_df)
-            # overall_hold_out_df['category'] = ['Overall' for _ in cats]
-
-            overall_hold_out_df = pd.concat((_hold_out_df, overall_hold_out_df))
-            # grouped_results = overall_hold_out_df.groupby(['category']).apply(
-            #     lambda x: np_sMAPE(x.preds, x.acts, x.shape[0]))
-
-            # results = grouped_results.to_dict()
-            # results['hold_out_loss'] = float(hold_out_loss.detach().cpu())
-
-            # print(results)
             print(hold_out_loss)
 
         return hold_out_loss.detach().cpu().item()
-    
-    def save(self, save_dir='..'):
-        print('Loss decreased, saving model!')
-        torch.save({'state_dict': self.model.state_dict()}, model_path)
-
-    def log_values(self, info):
-
-        # SCALAR
-        for tag, value in info.items():
-            self.log.log_scalar(tag, value, self.epochs + 1)
-
-    def log_hists(self):
-        # HISTS
-        batch_params = dict()
-        for tag, value in self.model.named_parameters():
-            if value.grad is not None:
-                if "init" in tag:
-                    name, _ = tag.split(".")
-                    if name not in batch_params.keys() or "%s/grad" % name not in batch_params.keys():
-                        batch_params[name] = []
-                        batch_params["%s/grad" % name] = []
-                    batch_params[name].append(value.data.cpu().numpy())
-                    batch_params["%s/grad" % name].append(value.grad.cpu().numpy())
-                else:
-                    tag = tag.replace('.', '/')
-                    self.log.log_histogram(tag, value.data.cpu().numpy(), self.epochs + 1)
-                    self.log.log_histogram(tag + '/grad', value.grad.data.cpu().numpy(), self.epochs + 1)
-            else:
-                print('Not printing %s because it\'s not updating' % tag)
-
-        for tag, v in batch_params.items():
-            vals = np.concatenate(np.array(v))
-            self.log.log_histogram(tag, vals, self.epochs + 1)

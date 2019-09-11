@@ -4,37 +4,28 @@ from torch.utils.data import Dataset
 
 class DatasetTS(Dataset):
 
-    def __init__(self, time_series, forecast_length, backcast_length):
+    def __init__(self, time_series, forecast_length):
         # TODO
         # if sliding window is none, set equal to backcast length
         # self.sliding_window
 
         self.data = time_series
-        self.forecast_length, self.backcast_length = forecast_length, backcast_length
+        self.forecast_length = forecast_length
     
     def __len__(self):
         # TODO use sliding window
         # (len(self.data) - self.forecast_length) / self.sliding_window
         # import ipdb; ipdb.set_trace()
-        length = int(np.floor(len(self.data)/ (self.forecast_length + self.backcast_length)))
+        length = len(self.data)
         return length
 
     def __getitem__(self, index):
         if(index > self.__len__()):
             raise IndexError("Index out of Bounds")
-        idx = index
-        index = index * (self.backcast_length + self.forecast_length)
-        # index = index * self.sliding_window
-        if index+self.backcast_length:
-            backcast_model_input = self.data[index:index+self.backcast_length]
-        else: 
-            backcast_model_input = self.data[index:]
-        forecast_actuals_idx = index+self.backcast_length
-        forecast_actuals_output = self.data[forecast_actuals_idx:
-                                            forecast_actuals_idx+self.forecast_length]
-        forecast_actuals_output = np.array(forecast_actuals_output, dtype=np.float32)
-        backcast_model_input = np.array(backcast_model_input, dtype=np.float32)
-        return backcast_model_input, forecast_actuals_output, idx
+        backcast = self.data[index][ : -self.forecast_length]
+        forecast = self.data[index][-self.forecast_length : ]
+        
+        return backcast, forecast, index
 
 
 def data_generator(num_samples, backcast_length, forecast_length, signal_type='seasonality', random=False):

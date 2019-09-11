@@ -2,8 +2,7 @@ from math import sqrt
 
 import torch
 
-def configure(interval, num_categories, learning_rate = 1e-3, custom_dilations = None,
-    custom_loss = None):
+def configure(interval, learning_rate = 1e-3, custom_dilations = None):
     configuration = {
     'prod' : True,
     'percentile' : 50,
@@ -16,7 +15,6 @@ def configure(interval, num_categories, learning_rate = 1e-3, custom_dilations =
     'loss' : 1e-3,
     'percentile' : 50,
     'epochs' : 25,
-    "num_categories" : num_categories,
     'training_percentile' : 45,
     'gradient_clipping': 20,
     'lr_anneal_rate': 0.5,
@@ -29,7 +27,7 @@ def configure(interval, num_categories, learning_rate = 1e-3, custom_dilations =
         'seasonality' : 24,
         'state_hsize' : 50,
         'output_size' : 8,
-        'input_size' : 48,
+        'input_size' : 48, # Usually 48
         'dilations' : [(1, 4), (24, 68)],
         'variable' : 'Hourly',
         'level_variability_penalty': 50

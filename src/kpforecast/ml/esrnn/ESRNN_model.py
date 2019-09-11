@@ -10,7 +10,8 @@ from DRNN import DRNN
 
 class ESRNN_model(nn.Module):
     '''
-    Implementation of the ESRNN model - a combination of Holt Winter's smoothing and an RNN. 
+    Implementation of the ESRNN model - a combination of Holt Winter's smoothing and an RNN with
+    dilated LSTM layers. 
 
     This class constructs the per series arguments for Holt Winters Smoothing as well as the
     Dilated LSTM layers for the neural network used in conjunction with the smoothing
@@ -40,116 +41,115 @@ class ESRNN_model(nn.Module):
         self.scoring = nn.Linear(configuration['state_hsize'], configuration['output_size'])
         self.DRNN = RESIDUALDRNN(self.configuration)
                 
-    def forward(self, train, val, test, info_cat, idxs, testing=False):
+    def forward(self, inputs, val, idxs, evaluate = False):
         '''
         Feed forward for the ESRNN module.
 
         Arguments
-            - train: a tensor containing all the series that the model will train on, all
+            - inputs: a tensor containing all the series that the model will train on, all
                 time series are expected to be of the same length
-            - val: the validation/hold-out set that we will evaluate the model with
-            - test: the test set
-            - info_cat: the extra information we will concatenate to the training data
-                for example, one hot encoded categorical data that we would like to
-                utilize
+            - val: the validation/hold-out set that we will evaluate the model with, will always 
+                be the last 'output_size' terms of our time series that we withhold from training
             - idxs: the indexes that our current batch is located at in the train tensor
+            - evaluate: a boolean indicating whether the model will train or calculate
+                the hold-out predictions
 
         Returns
-            - predictions: model's predictions on given training batch
-            - network_act: set of inputs given to our network
-            - hold_out_pred: predictions for the test set
-            - output_non_train: predictions for both the test and the train set
-            - 
+            - predictions: model's predictions for hold-out or the training batch
+            - actuals: set of inputs given to our network
         '''
         # Obtaining the per series parameters for the batch that we are training on
         alphas = self.logistic(torch.stack([self.level_smoothing_coef[idx] for idx in idxs]))
         gammas = self.logistic(torch.stack([self.season_smoothing_coef[idx] for idx in idxs]))
         seasonalities = torch.stack([self.seasonalities[idx] for idx in idxs]) 
 
-        train = train.float()
+        inputs = inputs.float()
 
         # Transposing seasonalities allows us to later use seasonality[i] for more easily 
-        # computing the i + 1 seasonality term for all series at once
-        
+        # computing the i + 1 seasonality term for all series at once    
         seasonalities = torch.exp(torch.transpose(seasonalities, 0, 1))
         seasonalities = torch.cat((seasonalities, seasonalities[0].unsqueeze(0)))
 
-        levels = (train[:, 0] / seasonalities[0]).unsqueeze(0)
-        log_diff_of_levels = []
+        # Clculating the first Holt-Winters level parameter
+        levels = (inputs[:, 0] / seasonalities[0]).unsqueeze(0)
 
-        for i in range(1, train.shape[1]):
+        for i in range(1, inputs.shape[1]):
             # Calculating levels per series
-            levels = torch.cat((levels, (alphas * (train[:, i] / seasonalities[1]) + (1 - alphas) * levels[i - 1]).unsqueeze(0)))
+            levels = torch.cat((levels, (alphas * (inputs[:, i] / seasonalities[1]) + (1 - alphas) * levels[i - 1]).unsqueeze(0)))
 
-            log_diff_of_levels.append(torch.log(levels[i] / levels[i - 1]))
-            
             # Calculating seasonalities per series
-            seasonalities = torch.cat((seasonalities, (gammas * (train[:, i] / levels[i]) + (1 - gammas) * seasonalities[i]).unsqueeze(0)))
+            seasonalities = torch.cat((seasonalities, (gammas * (inputs[:, i] / levels[i]) + (1 - gammas) * seasonalities[i]).unsqueeze(0)))
 
         # Transposing seasonalities and levels allowing us to call seasonalities/level[i] will return the values 
         # for the i th time series
         seasonalities = torch.transpose(seasonalities, 0, 1)
         levels = torch.transpose(torch.tensor(levels), 0, 1)
-
-        loss_mean_sq_log_diff_level = 0
-        if self.configuration['level_variability_penalty'] > 0:
-            sq_log_diff = torch.stack([(log_diff_of_levels[i] - log_diff_of_levels[i - 1]) ** 2 for i in range(1, len(log_diff_of_levels))])
-            loss_mean_sq_log_diff_level = torch.mean(sq_log_diff)
         
         # Extending seasonality for when the ouput is longer than the seasonality
         if self.configuration['output_size'] > self.configuration['seasonality']:
             start_extension = seasonalities.shape[1] - self.configuration['seasonality']
             seasonalities = torch.cat((seasonalities, seasonalities[:, :start_extension]), dim = 1)
 
-        
-        input_list, output_list = self.obtain_input_and_output(train, seasonalities, levels, info_cat)
+        input_list, output_list = self.obtain_input_and_output(inputs, seasonalities, levels)
 
-        self.train()
+        if not evaluate:
+            self.train()
 
-        predictions = self.series_forward(input_list[ : -self.configuration['output_size']])
-        network_act = output_list
+            # Calclating the predictions of the training set
+            predictions = self.series_forward(input_list[ : -self.configuration['output_size']])
+            actuals = output_list
 
-        self.eval()
-        
-        output_non_train = self.series_forward(input_list)
+        else:
+            self.eval()
+            output_non_train = self.series_forward(input_list)
 
-        # USE THE LAST VALUE OF THE NETWORK OUTPUT TO COMPUTE THE HOLDOUT PREDICTIONS
-        hold_out_reseas = output_non_train[-1] * seasonalities[:, -self.configuration['output_size'] : ]
-        hold_out_renorm = hold_out_reseas * levels[:, -1].unsqueeze(1)
+            # Using the last value of the output to calculate the holdout predictions
+            hold_out_reseas = output_non_train[-1] * seasonalities[:, -self.configuration['output_size'] : ]
+            hold_out_renorm = hold_out_reseas * levels[:, -1].unsqueeze(1)
+            hold_out_pred = hold_out_renorm * torch.gt(hold_out_renorm, 0).float()
 
-        hold_out_pred = hold_out_renorm * torch.gt(hold_out_renorm, 0).float()
-        hold_out_act = val
+            predictions = hold_out_pred
+            actuals = val
 
-        hold_out_act_deseas = hold_out_act.float() / seasonalities[:, -self.configuration['output_size']:]
-        hold_out_act_deseas_norm = hold_out_act_deseas / levels[:, -1].unsqueeze(1)
+            self.train()
 
-
-        self.train()
-
-        return predictions, network_act, (hold_out_pred, output_non_train), (hold_out_act, hold_out_act_deseas_norm), loss_mean_sq_log_diff_level
+        return predictions, actuals
     
-
-    def obtain_input_and_output(self, train, seasonalities, levels, info_cat):
+    
+    def obtain_input_and_output(self, train, seasonalities, levels):
         '''
         Deseasonalizes amd normalizes the training data into windows that can be input into the neural network.
+
+        Arguments
+            - train: the training batch we want to create our inputs and outputs from
+            - seasonalities: per series Holt-Winters parameters
+            - levels: per series Holt-Winters parameters
+
+        Returns
+            - input_list: list of time series of size config['input_size'] that will be fed 
+                into the RNN, created from normalized, deseasonalized subseries of train
+            - output_list: the corresponding outputs our RNN should have for our input_list,
+                is also normalized and deseasonalized
         '''
         input_list = []
         output_list = []
 
         for i in range(self.configuration['input_size'] - 1, train.shape[1]):
+            # The start and end indices in train that will create our current inputs
             input_start = i + 1 - self.configuration['input_size']
             input_end = i + 1
  
+            # Deseasonalizing and normalizing the input
             deseasonalized_train_input = train[:, input_start : input_end] / seasonalities[:, input_start : input_end]
             deseasonalized_norm_train_input = (deseasonalized_train_input / levels[:, i].unsqueeze(1))
-            if info_cat is not None:
-                deseasonalized_norm_train_input = torch.cat((deseasonalized_norm_train_input, info_cat), dim=1)
 
             input_list.append(deseasonalized_norm_train_input)
 
+            # The start and end indices in train that will create the outputs to our current inputs
             output_start = i + 1
             output_end = i + 1 + self.configuration['output_size'] 
 
+            # Only add the outputs to output_list the ouput if the indices is in the bounds of train
             if i < train.shape[1] - self.configuration['output_size']:
                 deseasonalized_train_output = train[:, output_start : output_end] / seasonalities[:, output_start : output_end]
                 deseasonalized_norm_train_output = (deseasonalized_train_output / levels[:, i].unsqueeze(1))
@@ -163,6 +163,12 @@ class ESRNN_model(nn.Module):
     def series_forward(self, data):
         '''
         Feed forward through the nonlinear, dilated RNN, and final scoring/resizing layers.
+
+        Arguments
+            - data: data we want to feed through our DRNN
+
+        Returns
+            - data: the input data that has been processed by the DRNN
         '''
         data = self.DRNN(data)
         
@@ -192,7 +198,7 @@ class RESIDUALDRNN(nn.Module):
         for i, dilation in enumerate(self.configuration['dilations']):
 
             if i == 0:
-                input_size = self.configuration['input_size'] + self.configuration['num_categories']
+                input_size = self.configuration['input_size']
             else:
                 input_size = self.configuration['state_hsize']
 
